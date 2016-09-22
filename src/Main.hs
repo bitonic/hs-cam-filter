@@ -88,7 +88,7 @@ main = do
                 img2 = CV.exceptError (CV.cvtColor (Proxy @'CV.BGR) (Proxy @'CV.RGB) img1)
             -- Resize the image to 100x100
             let img3 :: CV.Mat ('S ['D, 'D]) ('S 3) ('S Word8)
-                img3 = CV.exceptError (CV.coerceMat =<< CV.resize (CV.ResizeAbs (CV.toSize (L.V2 100 100))) CV.InterArea img2)
+                img3 = CV.exceptError (CV.coerceMat =<< CV.resize (CV.ResizeAbs (CV.toSize (L.V2 (fromIntegral optsWidth) (fromIntegral optsHeight)))) CV.InterArea img2)
             CV.withMatData img3 $ \_sizes ptr -> do
               -- Pack it as a ByteString
               bs <- BS.packCStringLen (castPtr ptr, fromIntegral (optsWidth * optsHeight * 3))
@@ -96,7 +96,6 @@ main = do
               writeIORef imgRef bs
               -- Instruct a redraw
               FLTK.redraw box
-              return ()
         FLTK.repeatTimeout frameDuration callback
   FLTK.addTimeout frameDuration callback
   FLTK.end w
