@@ -1,8 +1,8 @@
-name:                haskell-exchange-y2016
+name:                hs-cam-filter
 version:             0.1.0.0
 synopsis:            Simple project template from stack
 description:         Please see README.md
-homepage:            https://github.com/bitonic/haskell-exchange-y2016#readme
+homepage:            https://github.com/bitonic/hs-cam-filter#readme
 license:             BSD3
 license-file:        LICENSE
 author:              Francesco Mazzoli
@@ -12,7 +12,7 @@ category:            Web
 build-type:          Simple
 cabal-version:       >=1.10
 
-executable haskell-exchange-y2016
+executable hs-cam-filter
   hs-source-dirs:      src
   main-is:             Main.hs
   default-language:    Haskell2010
