@@ -133,31 +133,45 @@ run filters = do
     fail ("FLTK.run exited with a non-zero code: " ++ show ret)
 
 blur :: Filter
-blur = CV.exceptError . CV.gaussianBlur (0 :: L.V2 Int32) 10 0
+blur = CV.exceptError . CV.gaussianBlur (0 :: L.V2 Int32) 5 0
 
 circles :: Filter
 circles img = CV.exceptError $ do
-  grayscale <- CV.cvtColor CV.rgb CV.gray img
-  {-
-  let circles = CV.houghCircles 1 10 Nothing Nothing Nothing Nothing grayscale
-  traceM (show (length circles))
-  -}
-  return img
-  {-
+  gray <- CV.cvtColor CV.rgb CV.gray img
+  let cs = CV.houghCircles 1 10 Nothing Nothing Nothing Nothing gray
   CV.createMat $ do
     imgM <- CV.thaw img
-    forM_ circles $ \c -> do
-      let color :: L.V4 Double = L.V4 0 0 1 1
+    forM_ cs $ \c -> do
+      let color :: L.V4 Double = L.V4 0 0 255 255
       CV.circle imgM (round <$> CV.circleCenter c :: L.V2 Int32) (round (CV.circleRadius c)) color 1 CV.LineType_AA 0
     return imgM
-  -}
+
+grayscale :: Filter
+grayscale img =
+  CV.exceptError (CV.cvtColor CV.gray CV.rgb =<< CV.cvtColor CV.rgb CV.gray img)
+
+manga :: CV.CascadeClassifier -> Filter
+manga cc img = CV.exceptError $ do
+  imgGray <- CV.cvtColor CV.rgb CV.gray img
+  let eyes = CV.cascadeClassifierDetectMultiScale cc Nothing Nothing (Nothing :: Maybe (L.V2 Int32)) (Nothing :: Maybe (L.V2 Int32)) imgGray
+  CV.createMat $ do
+    imgM <- CV.thaw img
+    forM_ eyes $ \eye -> do
+      let color :: L.V4 Double = L.V4 0 0 255 255
+      CV.rectangle imgM eye color 3 CV.LineType_8 0
+    return imgM
 
 main :: IO ()
-main = run
-  [ ("none", id)
-  , ("blur", blur)
-  , ("circles", circles)
-  , ("edges", id)
-  , ("grayscale", id)
-  ]
+main = do
+  Just ccEyes <- CV.newCascadeClassifier "/usr/local/share/OpenCV/haarcascades/haarcascade_eye.xml"
+  run
+    [ ("none", id)
+    , ("blur", blur)
+    , ("circles", circles)
+    , ("lines", id)
+    , ("edges", id)
+    , ("grayscale", grayscale)
+    , ("floodfill", id)
+    , ("manga", manga ccEyes)
+    ]
 
