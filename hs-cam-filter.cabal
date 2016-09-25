@@ -16,7 +16,7 @@ executable hs-cam-filter
   hs-source-dirs:      src
   main-is:             Main.hs
   default-language:    Haskell2010
-  ghc-options:         -Wall -fwarn-incomplete-patterns -threaded -rtsopts
+  ghc-options:         -Wall -fwarn-incomplete-patterns -threaded -rtsopts -O2
   if os(darwin)
    ghc-Options: -pgml g++ "-optl-Wl,-lfltkc"
   if !os(darwin) && !os(windows)
@@ -27,3 +27,4 @@ executable hs-cam-filter
                      , optparse-applicative
                      , linear
                      , bytestring
+                     , primitive

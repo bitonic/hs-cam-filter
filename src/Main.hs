@@ -24,9 +24,13 @@ import qualified Graphics.UI.FLTK.LowLevel.FLTKHS as FLTK
 import Data.Word (Word8)
 import qualified Linear as L
 import qualified Data.ByteString as BS
-import Foreign.Ptr (castPtr)
+import Foreign.Ptr (castPtr, plusPtr)
 import Data.IORef
 import Data.Monoid ((<>))
+import Control.Monad.Primitive (PrimMonad, PrimState, unsafePrimToPrim)
+import System.IO.Unsafe (unsafePerformIO)
+import Foreign.Storable (peek, poke)
+import qualified OpenCV.Internal.Mutable as CV
 
 data Options = Options
   { optsCamId :: Int32
@@ -150,20 +154,75 @@ grayscale :: Filter
 grayscale img =
   CV.exceptError (CV.cvtColor CV.gray CV.rgb =<< CV.cvtColor CV.rgb CV.gray img)
 
-manga :: CV.CascadeClassifier -> Filter
-manga cc img = CV.exceptError $ do
+overlayEyes ::
+     CV.Mat ('S ['D, 'D]) ('S 3) ('S Word8) -- ^ Background
+  -> CV.Mat ('S ['D, 'D]) ('S 4) ('S Word8) -- ^ Foreground, with alpha channel
+  -> L.V2 Int32 -- ^ Where to start overlaying in the background image
+  -> CV.Mat ('S ['D, 'D]) ('S 3) ('S Word8) -- ^ Result
+overlayEyes bgr fgr (L.V2 startX startY) = CV.exceptError $ CV.createMat $ do
+  bgrM <- CV.thaw bgr
+  forM_ ixs $ \((bgrX, bgrY), (fgrX, fgrY)) -> do
+    let alpha = readChannel fgr fgrX fgrY 3 / 255
+    -- 0
+    let bgrW = readChannel bgr bgrX bgrY 0
+    let fgrW = readChannel fgr fgrX fgrY 0
+    let w = (1 - alpha) * bgrW + alpha * fgrW
+    writeChannel bgrM bgrX bgrY 0 w
+    -- 1
+    let bgrW = readChannel bgr bgrX bgrY 1
+    let fgrW = readChannel fgr fgrX fgrY 1
+    let w = (1 - alpha) * bgrW + alpha * fgrW
+    writeChannel bgrM bgrX bgrY 1 w
+    -- 1
+    let bgrW = readChannel bgr bgrX bgrY 2
+    let fgrW = readChannel fgr fgrX fgrY 2
+    let w = (1 - alpha) * bgrW + alpha * fgrW
+    writeChannel bgrM bgrX bgrY 2 w
+  return bgrM
+  where
+    [bgrRows, bgrCols] = CV.miShape (CV.matInfo bgr)
+    [fgrRows, fgrCols] = CV.miShape (CV.matInfo fgr)
+    ixs =
+      [ ((bgrX, bgrY), (fgrX, fgrY))
+      | (bgrY, fgrY) <- takeWhile
+          (\(_, fgrY) -> fgrY < fgrRows)
+          [(bgrY, bgrY - startY) | bgrY <- [max startY 0..bgrRows-1]]
+      , (bgrX, fgrX) <- takeWhile
+          (\(_, fgrX) -> fgrX < fgrCols)
+          [(bgrX, bgrX - startX) | bgrX <- [max startX 0..bgrCols-1]]
+      ]
+
+    readChannel :: CV.Mat ('S ['D, 'D]) ('S channels) ('S Word8) -> Int32 -> Int32 -> Int -> Double
+    readChannel mat x y ch = unsafePerformIO $ CV.withMatData mat $ \step dataPtr -> do
+      let elemPtr = CV.matElemAddress dataPtr (fromIntegral <$> step) (map fromIntegral [y, x])
+      w :: Word8 <- peek (elemPtr `plusPtr` ch)
+      return (fromIntegral w)
+
+    writeChannel :: (PrimMonad m) => CV.Mutable (CV.Mat ('S ['D, 'D]) ('S channels) ('S Word8)) (PrimState m) -> Int32 -> Int32 -> Int -> Double -> m ()
+    writeChannel mat x y ch v = unsafePrimToPrim $ CV.withMatData (CV.unMut mat) $ \step dataPtr -> do
+      let elemPtr = CV.matElemAddress dataPtr (fromIntegral <$> step) (map fromIntegral [y, x])
+      let w :: Word8 = round v
+      poke (elemPtr `plusPtr` ch) w     
+
+manga :: CV.CascadeClassifier -> CV.Mat ('S ['D, 'D]) ('S 4) ('S Word8) -> Filter
+manga cc overlay img = CV.exceptError $ do
   imgGray <- CV.cvtColor CV.rgb CV.gray img
   let eyes = CV.cascadeClassifierDetectMultiScale cc Nothing Nothing (Nothing :: Maybe (L.V2 Int32)) (Nothing :: Maybe (L.V2 Int32)) imgGray
-  CV.createMat $ do
+  img' <- CV.createMat $ do
     imgM <- CV.thaw img
     forM_ eyes $ \eye -> do
       let color :: L.V4 Double = L.V4 0 0 255 255
       CV.rectangle imgM eye color 3 CV.LineType_8 0
     return imgM
+  return (overlayEyes img' overlay (L.V2 0 0))
 
 main :: IO ()
 main = do
   Just ccEyes <- CV.newCascadeClassifier "/usr/local/share/OpenCV/haarcascades/haarcascade_eye.xml"
+  mangaEyes :: CV.Mat ('S ['D, 'D]) ('S 4) ('S Word8) <- do
+    me1 :: CV.Mat ('S ['D, 'D]) 'D 'D <- CV.imdecode CV.ImreadUnchanged <$> BS.readFile "manga-eyes.png"
+    let me2 :: CV.Mat ('S ['D, 'D]) ('S 4) ('S Word8) = CV.exceptError (CV.coerceMat me1)
+    return (CV.exceptError (CV.cvtColor CV.bgra CV.rgba me2))
   run
     [ ("none", id)
     , ("blur", blur)
@@ -172,6 +231,6 @@ main = do
     , ("edges", id)
     , ("grayscale", grayscale)
     , ("floodfill", id)
-    , ("manga", manga ccEyes)
+    , ("manga", manga ccEyes mangaEyes)
     ]
 
