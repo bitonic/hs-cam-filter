@@ -33,6 +33,8 @@ import Foreign.Storable (peek, poke)
 import qualified OpenCV.Internal.Mutable as CV
 import Data.Foldable (toList)
 import Foreign.C (CFloat)
+import Control.Monad.Trans.Except (runExceptT)
+import Control.Monad.Trans.Class (lift)
 
 data Options = Options
   { optsCamId :: Int32
@@ -41,7 +43,7 @@ data Options = Options
   , optsFps :: Int
   } deriving (Eq, Show)
 
-type Filter = CV.Mat ('S ['D, 'D]) ('S 3) ('S Word8) -> CV.Mat ('S ['D, 'D]) ('S 3) ('S Word8)
+type Filter = CV.Mat ('S ['D, 'D]) ('S 3) ('S Word8) -> CV.CvExcept (CV.Mat ('S ['D, 'D]) ('S 3) ('S Word8))
 
 run :: [(String, Filter)] -> IO ()
 run filters = do
@@ -105,18 +107,24 @@ run filters = do
             let img1 :: CV.Mat ('S ['D, 'D]) ('S 3) ('S Word8)
                 img1 = CV.exceptError (CV.coerceMat img0)
             -- Apply filters
-            let applyFilters :: CV.Mat ('S ['D, 'D]) ('S 3) ('S Word8) -> [FLTK.Ref FLTK.Choice] -> IO (CV.Mat ('S ['D, 'D]) ('S 3) ('S Word8))
+            let applyFilters :: CV.Mat ('S ['D, 'D]) ('S 3) ('S Word8) -> [FLTK.Ref FLTK.Choice] -> CV.CvExceptT IO (CV.Mat ('S ['D, 'D]) ('S 3) ('S Word8))
                 applyFilters !img = \case
                   [] -> return img
                   choice : choices_ -> do
-                    txt <- FLTK.getText choice
+                    txt <- lift (FLTK.getText choice)
                     img' <- if null txt
                       then return img
                       else case lookup txt filters of
-                        Nothing -> fail ("Could not find filter " ++ show txt)
-                        Just f -> return (f img)
+                        Nothing -> lift (fail ("Could not find filter " ++ show txt))
+                        Just f -> CV.pureExcept (f img)
                     applyFilters img' choices_
-            img2 <- applyFilters img1 choices
+            img2 <- do
+              mbImg <- runExceptT (applyFilters img1 choices)
+              case mbImg of
+                Left err -> do
+                  putStrLn ("Some filter failed, skipping: " ++ show err)
+                  return img1
+                Right img -> return img
             -- Convert to RGB
             let img3 :: CV.Mat ('S ['D, 'D]) ('S 3) ('S Word8)
                 img3 = CV.exceptError (CV.cvtColor CV.bgr CV.rgb img2)
@@ -139,10 +147,10 @@ run filters = do
     fail ("FLTK.run exited with a non-zero code: " ++ show ret)
 
 blur :: Filter
-blur = CV.exceptError . CV.gaussianBlur (0 :: L.V2 Int32) 5 0
+blur = CV.gaussianBlur (0 :: L.V2 Int32) 5 0
 
 circles :: Filter
-circles img = CV.exceptError $ do
+circles img = do
   gray <- CV.cvtColor CV.rgb CV.gray img
   let cs = CV.houghCircles 1 10 Nothing Nothing Nothing Nothing gray
   CV.createMat $ do
@@ -154,15 +162,15 @@ circles img = CV.exceptError $ do
 
 grayscale :: Filter
 grayscale img =
-  CV.exceptError (CV.cvtColor CV.gray CV.rgb =<< CV.cvtColor CV.rgb CV.gray img)
+  CV.cvtColor CV.gray CV.rgb =<< CV.cvtColor CV.rgb CV.gray img
 
-greenScreenMask :: CV.Mat ('S ['D, 'D]) ('S 3) ('S Word8) -> CV.Mat ('S ['D, 'D]) ('S 1) ('S Word8)
-greenScreenMask img = CV.exceptError $ do
+greenScreenMask :: CV.Mat ('S ['D, 'D]) ('S 3) ('S Word8) -> CV.CvExcept (CV.Mat ('S ['D, 'D]) ('S 1) ('S Word8))
+greenScreenMask img = do
   let s :: L.V4 Double = L.V4 0 255 0 255
   CV.inRange img s s
 
 manga :: CV.CascadeClassifier -> MaskedImage -> MaskedImage -> Filter
-manga cc leftMangaEye rightMangaEye img = CV.exceptError $ do
+manga cc leftMangaEye rightMangaEye img = do
   imgGray <- CV.cvtColor CV.rgb CV.gray img
   let eyes = CV.cascadeClassifierDetectMultiScale cc Nothing Nothing (Nothing :: Maybe (L.V2 Int32)) (Nothing :: Maybe (L.V2 Int32)) imgGray
   case map CV.fromRect (toList eyes) of
@@ -179,12 +187,12 @@ manga cc leftMangaEye rightMangaEye img = CV.exceptError $ do
       let rot = atan2 ltrY ltrX
       CV.createMat $ do
         imgM <- CV.thaw img
-        let color :: L.V4 Double = L.V4 0 0 255 255
-        CV.line imgM (round <$> rectCenter leftEye) (round <$> rectCenter rightEye) color 5 CV.LineType_AA 0
-        let scaledLeftEye = scaleMaskedImage scale (rotateMaskedImage rot leftMangaEye)
-        copyMaskedImageTo imgM (fmap round (leftEyeCenter - fmap (/ 2) (matCenter (miImage scaledLeftEye)))) scaledLeftEye
-        let scaledRightEye = scaleMaskedImage scale (rotateMaskedImage rot rightMangaEye)
-        copyMaskedImageTo imgM (fmap round (rightEyeCenter - fmap (/ 2) (matCenter (miImage scaledRightEye)))) scaledRightEye
+        --let color :: L.V4 Double = L.V4 0 0 255 255
+        --CV.line imgM (round <$> rectCenter leftEye) (round <$> rectCenter rightEye) color 5 CV.LineType_AA 0
+        scaledLeftEye <- CV.pureExcept $ scaleMaskedImage scale =<< rotateMaskedImage rot leftMangaEye
+        copyMaskedImageTo imgM (fmap round (leftEyeCenter - matCenter (miImage scaledLeftEye))) scaledLeftEye
+        scaledRightEye <- CV.pureExcept $ scaleMaskedImage scale =<< rotateMaskedImage rot rightMangaEye
+        copyMaskedImageTo imgM (fmap round (rightEyeCenter - matCenter (miImage scaledRightEye))) scaledRightEye
         return imgM
     _ -> return img
 
@@ -196,25 +204,23 @@ data MaskedImage = MaskedImage
   , miMask :: CV.Mat ('S ['D, 'D]) ('S 1) ('S Word8)
   }
 
-readMaskedImage :: FilePath -> IO MaskedImage
+readMaskedImage :: FilePath -> CV.CvExceptT IO MaskedImage
 readMaskedImage fp = do
-  me1 :: CV.Mat ('S ['D, 'D]) 'D 'D <- CV.imdecode CV.ImreadUnchanged <$> BS.readFile fp
-  let me2 :: CV.Mat ('S ['D, 'D]) ('S 4) ('S Word8) = CV.exceptError (CV.coerceMat me1)
-  let me3 = CV.exceptError (CV.cvtColor CV.bgra CV.rgb me2)
-  let mask :: CV.Mat ('S ['D, 'D]) ('S 1) ('S Word8) = CV.exceptError (CV.bitwiseNot (greenScreenMask me3))
+  me1 :: CV.Mat ('S ['D, 'D]) 'D 'D <- CV.imdecode CV.ImreadUnchanged <$> lift (BS.readFile fp)
+  me2 :: CV.Mat ('S ['D, 'D]) ('S 4) ('S Word8) <- CV.pureExcept (CV.coerceMat me1)
+  me3 <- CV.pureExcept (CV.cvtColor CV.bgra CV.rgb me2)
+  mask :: CV.Mat ('S ['D, 'D]) ('S 1) ('S Word8) <- CV.pureExcept (CV.bitwiseNot =<< greenScreenMask me3)
   return (MaskedImage me3 mask)
 
-scaleMaskedImage :: Double -> MaskedImage -> MaskedImage
+scaleMaskedImage :: Double -> MaskedImage -> CV.CvExcept MaskedImage
 scaleMaskedImage s MaskedImage{..} = MaskedImage
-  { miImage = CV.exceptError (CV.resize (CV.ResizeRel (L.V2 s s)) CV.InterArea miImage)
-  , miMask = CV.exceptError (CV.resize (CV.ResizeRel (L.V2 s s)) CV.InterArea miMask)
-  }
+  <$> CV.resize (CV.ResizeRel (L.V2 s s)) CV.InterArea miImage
+  <*> CV.resize (CV.ResizeRel (L.V2 s s)) CV.InterArea miMask
 
-rotateMaskedImage :: Double -> MaskedImage -> MaskedImage
+rotateMaskedImage :: Double -> MaskedImage -> CV.CvExcept MaskedImage
 rotateMaskedImage ang0 MaskedImage{..} = MaskedImage
-  { miImage = CV.exceptError (CV.warpAffine miImage (CV.getRotationMatrix2D center ang 1) CV.InterArea False False (CV.BorderConstant (CV.toScalar (L.V4 0 0 0 0 :: L.V4 Double))))
-  , miMask = CV.exceptError (CV.warpAffine miMask (CV.getRotationMatrix2D center ang 1) CV.InterArea False False (CV.BorderConstant (CV.toScalar (L.V4 0 0 0 0 :: L.V4 Double))))
-  }
+  <$> CV.warpAffine miImage (CV.getRotationMatrix2D center ang 1) CV.InterArea False False (CV.BorderConstant (CV.toScalar (L.V4 0 0 0 0 :: L.V4 Double)))
+  <*> CV.warpAffine miMask (CV.getRotationMatrix2D center ang 1) CV.InterArea False False (CV.BorderConstant (CV.toScalar (L.V4 0 0 0 0 :: L.V4 Double)))
   where
     ang = -(ang0 * 180 / pi)
 
@@ -232,22 +238,25 @@ copyMaskedImageTo ::
   -> L.V2 Int32
   -> MaskedImage
   -> CV.CvExceptT m ()
-copyMaskedImageTo img from MaskedImage{..} =
-  CV.matCopyToM img from miImage (Just miMask)
+copyMaskedImageTo dst from@(L.V2 fromX fromY) mi = do
+  let [dstRows, dstCols] = CV.miShape (CV.matInfo (CV.unMut dst))
+  let [srcRows, srcCols] = CV.miShape (CV.matInfo (miImage mi))
+  when (fromX >= 0 && fromX + srcCols <= dstCols && fromY >= 0 && fromY + srcRows <= dstRows) $
+    CV.matCopyToM dst from (miImage mi) (Just (miMask mi))
 
 main :: IO ()
 main = do
   Just ccEyes <- CV.newCascadeClassifier "haarcascade_eye.xml"
-  leftMangaEye <- readMaskedImage "manga-eyes-left.png"
-  rightMangaEye <- readMaskedImage "manga-eyes-right.png"
+  leftMangaEye <- CV.exceptErrorIO (readMaskedImage "manga-eyes-left.png")
+  rightMangaEye <- CV.exceptErrorIO (readMaskedImage "manga-eyes-right.png")
   run
-    [ ("none", id)
+    [ ("none", return)
     , ("blur", blur)
     , ("circles", circles)
-    , ("lines", id)
-    , ("edges", id)
+    , ("lines", return)
+    , ("edges", return)
     , ("grayscale", grayscale)
-    , ("floodfill", id)
+    , ("floodfill", return)
     , ("manga", manga ccEyes leftMangaEye rightMangaEye)
     ]
 

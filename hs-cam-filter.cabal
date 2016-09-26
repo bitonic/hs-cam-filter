@@ -28,3 +28,4 @@ executable hs-cam-filter
                      , linear
                      , bytestring
                      , primitive
+                     , transformers
