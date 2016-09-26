@@ -31,6 +31,8 @@ import Control.Monad.Primitive (PrimMonad, PrimState, unsafePrimToPrim)
 import System.IO.Unsafe (unsafePerformIO)
 import Foreign.Storable (peek, poke)
 import qualified OpenCV.Internal.Mutable as CV
+import Data.Foldable (toList)
+import Foreign.C (CFloat)
 
 data Options = Options
   { optsCamId :: Int32
@@ -159,28 +161,85 @@ greenScreenMask img = CV.exceptError $ do
   let s :: L.V4 Double = L.V4 0 255 0 255
   CV.inRange img s s
 
-manga :: CV.CascadeClassifier -> CV.Mat ('S ['D, 'D]) ('S 3) ('S Word8) -> CV.Mat ('S ['D, 'D]) ('S 1) ('S Word8) -> Filter
-manga cc overlay overlayMask img = CV.exceptError $ do
+manga :: CV.CascadeClassifier -> MaskedImage -> MaskedImage -> Filter
+manga cc leftMangaEye rightMangaEye img = CV.exceptError $ do
   imgGray <- CV.cvtColor CV.rgb CV.gray img
   let eyes = CV.cascadeClassifierDetectMultiScale cc Nothing Nothing (Nothing :: Maybe (L.V2 Int32)) (Nothing :: Maybe (L.V2 Int32)) imgGray
-  CV.createMat $ do
-    imgM <- CV.thaw img
-    forM_ eyes $ \eye -> do
-      let color :: L.V4 Double = L.V4 0 0 255 255
-      CV.rectangle imgM eye color 3 CV.LineType_8 0
-    CV.matCopyToM imgM (L.V2 0 0) overlay (Just overlayMask)
-    return imgM
+  case map CV.fromRect (toList eyes) of
+    eye1 : eye2 : _rest -> do
+      let rectX r = let L.V2 x _ = CV.hRectTopLeft r in x
+      let rectCenter :: CV.HRect Int32 -> L.V2 Double
+          rectCenter (CV.HRect (L.V2 x y) (L.V2 w h)) = L.V2 (fromIntegral x + fromIntegral w / 2) (fromIntegral y + fromIntegral h / 2)
+      let (leftEye, rightEye) = if rectX eye1 < rectX eye2 then (eye1, eye2) else (eye2, eye1)
+      let leftEyeCenter = rectCenter leftEye
+      let rightEyeCenter = rectCenter rightEye
+      let leftToRight@(L.V2 ltrX ltrY) = rightEyeCenter - leftEyeCenter
+      let dist = L.norm leftToRight
+      let scale = dist / mangaEyesDistance
+      let rot = atan2 ltrY ltrX
+      CV.createMat $ do
+        imgM <- CV.thaw img
+        let color :: L.V4 Double = L.V4 0 0 255 255
+        CV.line imgM (round <$> rectCenter leftEye) (round <$> rectCenter rightEye) color 5 CV.LineType_AA 0
+        let scaledLeftEye = scaleMaskedImage scale (rotateMaskedImage rot leftMangaEye)
+        copyMaskedImageTo imgM (fmap round (leftEyeCenter - fmap (/ 2) (matCenter (miImage scaledLeftEye)))) scaledLeftEye
+        let scaledRightEye = scaleMaskedImage scale (rotateMaskedImage rot rightMangaEye)
+        copyMaskedImageTo imgM (fmap round (rightEyeCenter - fmap (/ 2) (matCenter (miImage scaledRightEye)))) scaledRightEye
+        return imgM
+    _ -> return img
+
+mangaEyesDistance :: Double
+mangaEyesDistance = 371
+
+data MaskedImage = MaskedImage
+  { miImage :: CV.Mat ('S ['D, 'D]) ('S 3) ('S Word8)
+  , miMask :: CV.Mat ('S ['D, 'D]) ('S 1) ('S Word8)
+  }
+
+readMaskedImage :: FilePath -> IO MaskedImage
+readMaskedImage fp = do
+  me1 :: CV.Mat ('S ['D, 'D]) 'D 'D <- CV.imdecode CV.ImreadUnchanged <$> BS.readFile fp
+  let me2 :: CV.Mat ('S ['D, 'D]) ('S 4) ('S Word8) = CV.exceptError (CV.coerceMat me1)
+  let me3 = CV.exceptError (CV.cvtColor CV.bgra CV.rgb me2)
+  let mask :: CV.Mat ('S ['D, 'D]) ('S 1) ('S Word8) = CV.exceptError (CV.bitwiseNot (greenScreenMask me3))
+  return (MaskedImage me3 mask)
+
+scaleMaskedImage :: Double -> MaskedImage -> MaskedImage
+scaleMaskedImage s MaskedImage{..} = MaskedImage
+  { miImage = CV.exceptError (CV.resize (CV.ResizeRel (L.V2 s s)) CV.InterArea miImage)
+  , miMask = CV.exceptError (CV.resize (CV.ResizeRel (L.V2 s s)) CV.InterArea miMask)
+  }
+
+rotateMaskedImage :: Double -> MaskedImage -> MaskedImage
+rotateMaskedImage ang0 MaskedImage{..} = MaskedImage
+  { miImage = CV.exceptError (CV.warpAffine miImage (CV.getRotationMatrix2D center ang 1) CV.InterArea False False (CV.BorderConstant (CV.toScalar (L.V4 0 0 0 0 :: L.V4 Double))))
+  , miMask = CV.exceptError (CV.warpAffine miMask (CV.getRotationMatrix2D center ang 1) CV.InterArea False False (CV.BorderConstant (CV.toScalar (L.V4 0 0 0 0 :: L.V4 Double))))
+  }
+  where
+    ang = -(ang0 * 180 / pi)
+
+    center :: L.V2 CFloat
+    center = matCenter miImage
+
+matCenter :: (Fractional a) => CV.Mat ('CV.S [h, w]) chans depth -> L.V2 a
+matCenter mat = let
+  [rows, cols] = CV.miShape (CV.matInfo mat)
+  in L.V2 (fromIntegral cols / 2) (fromIntegral rows / 2)
+
+copyMaskedImageTo ::
+     (PrimMonad m)
+  => CV.Mut (CV.Mat ('CV.S '[dstHeight, dstWidth]) ('CV.S 3) ('CV.S Word8)) (PrimState m)
+  -> L.V2 Int32
+  -> MaskedImage
+  -> CV.CvExceptT m ()
+copyMaskedImageTo img from MaskedImage{..} =
+  CV.matCopyToM img from miImage (Just miMask)
 
 main :: IO ()
 main = do
   Just ccEyes <- CV.newCascadeClassifier "/usr/local/share/OpenCV/haarcascades/haarcascade_eye.xml"
-  mangaEyes :: CV.Mat ('S ['D, 'D]) ('S 3) ('S Word8) <- do
-    me1 :: CV.Mat ('S ['D, 'D]) 'D 'D <- CV.imdecode CV.ImreadUnchanged <$> BS.readFile "manga-eyes.png"
-    let me2 :: CV.Mat ('S ['D, 'D]) ('S 4) ('S Word8) = CV.exceptError (CV.coerceMat me1)
-    let me3 = CV.exceptError (CV.resize (CV.ResizeAbs (CV.toSize (L.V2 400 300))) CV.InterArea me2)
-    return (CV.exceptError (CV.cvtColor CV.bgra CV.rgb me3))
-  let mangaEyesMask :: CV.Mat ('S ['D, 'D]) ('S 1) ('S Word8) = CV.exceptError (CV.bitwiseNot (greenScreenMask mangaEyes))
-  print (CV.matInfo mangaEyes, CV.matInfo mangaEyesMask)
+  leftMangaEye <- readMaskedImage "manga-eyes-left.png"
+  rightMangaEye <- readMaskedImage "manga-eyes-right.png"
   run
     [ ("none", id)
     , ("blur", blur)
@@ -189,6 +248,6 @@ main = do
     , ("edges", id)
     , ("grayscale", grayscale)
     , ("floodfill", id)
-    , ("manga", manga ccEyes mangaEyes mangaEyesMask)
+    , ("manga", manga ccEyes leftMangaEye rightMangaEye)
     ]
 
