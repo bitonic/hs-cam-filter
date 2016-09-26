@@ -237,7 +237,7 @@ copyMaskedImageTo img from MaskedImage{..} =
 
 main :: IO ()
 main = do
-  Just ccEyes <- CV.newCascadeClassifier "/usr/local/share/OpenCV/haarcascades/haarcascade_eye.xml"
+  Just ccEyes <- CV.newCascadeClassifier "haarcascade_eye.xml"
   leftMangaEye <- readMaskedImage "manga-eyes-left.png"
   rightMangaEye <- readMaskedImage "manga-eyes-right.png"
   run
