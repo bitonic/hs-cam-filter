@@ -10,6 +10,7 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE RankNTypes #-}
 module Utils
   ( -- * OpenCV + goodies
     module OpenCV
@@ -22,6 +23,7 @@ module Utils
   , circle
   , line
   , matCenter
+  , modifyMat
     -- ** Colors
   , blue
   , red
@@ -38,10 +40,18 @@ module Utils
 
     -- * Main entry point
   , run
+
+    -- * Extras
+  , module Control.Monad
+  , module Control.Lens
+  , module Data.Foldable
+  , module Linear
   ) where
 
-import Control.Monad (unless, void, forM, forM_, when)
-import OpenCV hiding (norm, blur, gaussianBlur, houghCircles, cascadeClassifierDetectMultiScale, canny, circle, line)
+import Data.Foldable
+import Control.Monad
+import Control.Lens hiding (from, ix)
+import OpenCV hiding (norm, blur, normalize, gaussianBlur, houghCircles, cascadeClassifierDetectMultiScale, canny, circle, line)
 import qualified OpenCV as CV
 import OpenCV.Internal.Core.Types.Mat
 import qualified Options.Applicative as Opts
@@ -51,7 +61,7 @@ import qualified Graphics.UI.FLTK.LowLevel.Fl_Types as FLTK
 import qualified Graphics.UI.FLTK.LowLevel.Fl_Enumerations as FLTK
 import qualified Graphics.UI.FLTK.LowLevel.FLTKHS as FLTK
 import Data.Word
-import qualified Linear as L
+import Linear
 import qualified Data.ByteString as BS
 import Foreign.Ptr (castPtr)
 import Data.IORef
@@ -69,22 +79,22 @@ import qualified Data.Vector as V
 houghCircles :: Mat ('S '[w, h]) ('S 1) ('S Word8) -> V.Vector Circle
 houghCircles = CV.houghCircles 1 10 Nothing Nothing Nothing Nothing
 
-rectCenter :: HRect Int32 -> L.V2 Double
-rectCenter (HRect (L.V2 x y) (L.V2 w h)) = L.V2 (fromIntegral x + fromIntegral w / 2) (fromIntegral y + fromIntegral h / 2)
+rectCenter :: HRect Int32 -> V2 Double
+rectCenter (HRect (V2 x y) (V2 w h)) = V2 (fromIntegral x + fromIntegral w / 2) (fromIntegral y + fromIntegral h / 2)
 
 gaussianBlur ::
      (depth `In` '[Word8, Word16, Float, Double])
   => Double
   -> Mat shape ('S channels) ('S depth)
   -> CvExcept (Mat shape ('S channels) ('S depth))
-gaussianBlur s = CV.gaussianBlur (0 :: L.V2 Int32) s 0
+gaussianBlur s = CV.gaussianBlur (0 :: V2 Int32) s 0
 
 cascadeClassifierDetectMultiScale ::
      CascadeClassifier
   -> Mat ('S [w, h]) ('S 1) ('S Word8)
   -> V.Vector (Rect Int32)
 cascadeClassifierDetectMultiScale cc =
-  CV.cascadeClassifierDetectMultiScale cc Nothing Nothing (Nothing :: Maybe (L.V2 Int32)) (Nothing :: Maybe (L.V2 Int32))
+  CV.cascadeClassifierDetectMultiScale cc Nothing Nothing (Nothing :: Maybe (V2 Int32)) (Nothing :: Maybe (V2 Int32))
 
 canny ::
      Mat ('S [w, h]) channels ('S Word8)
@@ -118,21 +128,31 @@ line img pt1 pt2 color thickness = CV.line img pt1 pt2 color thickness CV.LineTy
 safeMatCopyTo ::
      (PrimMonad m)
   => Mut (Mat ('S '[dstHeight, dstWidth]) channels ('S Word8)) (PrimState m)
-  -> L.V2 Int32
+  -> V2 Int32
   -> Mat ('S ['D, 'D]) channels ('S Word8)
   -> Mat ('S ['D, 'D]) ('S 1) ('S Word8)
   -> CvExceptT m ()
-safeMatCopyTo dst from@(L.V2 fromX fromY) src srcMask = do
+safeMatCopyTo dst from@(V2 fromX fromY) src srcMask = do
   let [dstRows, dstCols] = miShape (matInfo (unMut dst))
   let [srcRows, srcCols] = miShape (matInfo src)
   when (fromX >= 0 && fromX + srcCols <= dstCols && fromY >= 0 && fromY + srcRows <= dstRows) $
     matCopyToM dst from src (Just srcMask)
 
-blue :: L.V4 Double
-blue = L.V4 0 0 255 255
+blue :: V4 Double
+blue = V4 0 0 255 255
 
-red :: L.V4 Double
-red = L.V4 255 0 0 255
+red :: V4 Double
+red = V4 255 0 0 255
+
+modifyMat ::
+     Mat shape channels depth
+  -> (forall m. (PrimMonad m) => Mut (Mat shape channels depth) (PrimState m) -> CvExceptT m ())
+  -> CvExcept (Mat shape channels depth)
+modifyMat mat cont = do
+  createMat $ do
+    matM <- thaw mat
+    cont matM
+    return matM
 
 -- * Filters
 -----------------------------------------------------------------------
@@ -144,7 +164,7 @@ type Filter = Mat ('S ['D, 'D]) ('S 3) ('S Word8) -> CvExcept (Mat ('S ['D, 'D])
 
 greenScreenMask :: Mat ('S ['D, 'D]) ('S 3) ('S Word8) -> CvExcept (Mat ('S ['D, 'D]) ('S 1) ('S Word8))
 greenScreenMask img = do
-  let s :: L.V4 Double = L.V4 0 255 0 255
+  let s :: V4 Double = V4 0 255 0 255
   inRange img s s
 
 data MaskedImage = MaskedImage
@@ -162,34 +182,34 @@ readMaskedImage fp = do
 
 scaleMaskedImage :: Double -> MaskedImage -> CvExcept MaskedImage
 scaleMaskedImage s MaskedImage{..} = MaskedImage
-  <$> resize (ResizeRel (L.V2 s s)) InterArea miImage
-  <*> resize (ResizeRel (L.V2 s s)) InterArea miMask
+  <$> resize (ResizeRel (V2 s s)) InterArea miImage
+  <*> resize (ResizeRel (V2 s s)) InterArea miMask
 
 rotateMaskedImage :: Double -> MaskedImage -> CvExcept MaskedImage
 rotateMaskedImage ang0 MaskedImage{..} = MaskedImage
-  <$> warpAffine miImage (getRotationMatrix2D center ang 1) InterArea False False (BorderConstant (toScalar (L.V4 0 0 0 0 :: L.V4 Double)))
-  <*> warpAffine miMask (getRotationMatrix2D center ang 1) InterArea False False (BorderConstant (toScalar (L.V4 0 0 0 0 :: L.V4 Double)))
+  <$> warpAffine miImage (getRotationMatrix2D center ang 1) InterArea False False (BorderConstant (toScalar (V4 0 0 0 0 :: V4 Double)))
+  <*> warpAffine miMask (getRotationMatrix2D center ang 1) InterArea False False (BorderConstant (toScalar (V4 0 0 0 0 :: V4 Double)))
   where
     ang = -(ang0 * 180 / pi)
 
-    center :: L.V2 CFloat
+    center :: V2 CFloat
     center = matCenter miImage
 
 copyMaskedImageTo ::
      (PrimMonad m)
   => Mut (Mat ('S '[dstHeight, dstWidth]) ('S 3) ('S Word8)) (PrimState m)
-  -> L.V2 Int32
+  -> V2 Int32
   -> MaskedImage
   -> CvExceptT m ()
 copyMaskedImageTo dst from mi = safeMatCopyTo dst from (miImage mi) (miMask mi)
 
-maskedImageCenter :: (Fractional a) => MaskedImage -> L.V2 a
+maskedImageCenter :: (Fractional a) => MaskedImage -> V2 a
 maskedImageCenter = matCenter . miImage
 
-matCenter :: (Fractional a) => Mat ('S [h, w]) chans depth -> L.V2 a
+matCenter :: (Fractional a) => Mat ('S [h, w]) chans depth -> V2 a
 matCenter mat = let
   [rows, cols] = miShape (matInfo mat)
-  in L.V2 (fromIntegral cols / 2) (fromIntegral rows / 2)
+  in V2 (fromIntegral cols / 2) (fromIntegral rows / 2)
 
 -- * Main entry point
 -----------------------------------------------------------------------
@@ -286,7 +306,7 @@ run filters = do
                 Right img -> return img
             -- Resize the image to 100x100
             let img4 :: Mat ('S ['D, 'D]) ('S 3) ('S Word8)
-                img4 = exceptError (coerceMat =<< resize (ResizeAbs (toSize (L.V2 (fromIntegral optsWidth) (fromIntegral optsHeight)))) InterArea img3)
+                img4 = exceptError (coerceMat =<< resize (ResizeAbs (toSize (V2 (fromIntegral optsWidth) (fromIntegral optsHeight)))) InterArea img3)
             withMatData img4 $ \_sizes ptr -> do
               -- Pack it as a ByteString
               bs <- BS.packCStringLen (castPtr ptr, fromIntegral (optsWidth * optsHeight * 3))
