@@ -32,3 +32,4 @@ executable hs-cam-filter
                      , transformers
                      , vector
                      , lens
+                     , text

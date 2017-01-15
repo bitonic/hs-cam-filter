@@ -1,11 +1,11 @@
-resolver: lts-7.0
+resolver: lts-7.15
 packages:
 - '.'
 - location:
-   git: git@github.com:bitonic/haskell-opencv.git
-   commit: c7d181a4c16ccdda6e967851f75f5afcfd52d48b
+   git: git@github.com:LumiGuide/haskell-opencv.git
+   commit: 4594ef0d63b990cd57f15068de3e97ce9ab8da4a
   extra-dep: true
 extra-deps:
-- fltkhs-0.4.0.9
+- fltkhs-0.5.0.1
 flags: {}
 extra-package-dbs: []

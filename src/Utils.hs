@@ -5,6 +5,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE TypeOperators #-}
@@ -65,6 +66,7 @@ import Linear
 import qualified Data.ByteString as BS
 import Foreign.Ptr (castPtr)
 import Data.IORef
+import qualified Data.Text as T
 import Data.Monoid ((<>))
 import Control.Monad.Primitive (PrimMonad, PrimState)
 import OpenCV.Internal.Mutable
@@ -221,7 +223,7 @@ data Options = Options
   , optsFps :: Int
   } deriving (Eq, Show)
 
-run :: [(String, Filter)] -> IO ()
+run :: [(T.Text, Filter)] -> IO ()
 run filters = do
   -- Parse cmd line options
   let parser = do
@@ -265,7 +267,7 @@ run filters = do
             cap <- newVideoCapture
             -- Open the first available video capture device. Usually the
             -- webcam if run on a laptop.
-            exceptErrorIO (videoCaptureOpen cap (VideoDeviceSource optsCamId))
+            exceptErrorIO (videoCaptureOpen cap (VideoDeviceSource optsCamId Nothing))
             isOpened <- videoCaptureIsOpened cap
             unless isOpened (fail "Couldn't open video capture device")
             writeIORef mbCapRef (Just cap)
@@ -291,7 +293,7 @@ run filters = do
                   [] -> return img
                   choice : choices_ -> do
                     txt <- lift (FLTK.getText choice)
-                    img' <- if null txt
+                    img' <- if T.null txt
                       then return img
                       else case lookup txt filters of
                         Nothing -> lift (fail ("Could not find filter " ++ show txt))
