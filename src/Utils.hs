@@ -150,7 +150,7 @@ modifyMat ::
      Mat shape channels depth
   -> (forall m. (PrimMonad m) => Mut (Mat shape channels depth) (PrimState m) -> CvExceptT m ())
   -> CvExcept (Mat shape channels depth)
-modifyMat mat cont = do
+modifyMat mat cont =
   createMat $ do
     matM <- thaw mat
     cont matM
